@@ -129,6 +129,9 @@ div[role="radiogroup"] > label:has(input:checked) {
 st.markdown(CSS, unsafe_allow_html=True)
 
 
+PREVIEW_ROWS = 10  # preview is limited to this many rows
+
+
 # ----------------------------------------------------------------------------
 # Shared helpers
 # ----------------------------------------------------------------------------
@@ -350,15 +353,11 @@ def excel_to_csv_page():
         k2.metric("Columns", f"{df.width:,}")
         k3.metric("Null cells", f"{sum(df.null_count().row(0)):,}")
 
-        max_preview = min(df.height, 1000)
-        if max_preview > 5:
-            n_rows = st.slider("Rows to preview", 5, max_preview, min(20, max_preview))
-        else:
-            n_rows = max_preview
         if df.height == 0:
             st.info("This sheet is empty.")
         else:
-            show_df(df.head(n_rows))
+            show_df(df.head(PREVIEW_ROWS))
+            st.caption(f"Showing the first {min(PREVIEW_ROWS, df.height)} of {df.height:,} rows.")
 
     with tab_cols:
         nulls = df.null_count().row(0)
@@ -488,7 +487,8 @@ def csv_to_excel_page():
             if df.height == 0:
                 st.info("This file has no data rows.")
             else:
-                show_df(df.head(50))
+                show_df(df.head(PREVIEW_ROWS))
+                st.caption(f"Showing the first {min(PREVIEW_ROWS, df.height)} of {df.height:,} rows.")
 
     st.markdown("### 💾 Export")
     default_name = frames[0][0] if len(frames) == 1 else "combined"
