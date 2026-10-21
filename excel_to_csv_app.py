@@ -458,7 +458,7 @@ with st.sidebar:
                 "Upload an <b>.xlsx / .xlsm / .xls</b> file.",
                 "Pick the <b>sheet</b> you want from the chips.",
                 "Check the <b>preview</b> (first 10 rows), columns and stats.",
-                "Download <b>filename_sheetname.csv</b>, or every sheet as a ZIP.",
+                "In the <b>Export</b> tab, set the delimiter and header, then download <b>filename_sheetname.csv</b> or every sheet as a ZIP.",
             ]
         )
         + '<div class="sb-group">🔄 CSV → Excel</div>'
@@ -472,22 +472,6 @@ with st.sidebar:
         ),
         unsafe_allow_html=True,
     )
-
-    st.divider()
-
-    # ---- Settings ----
-    st.markdown('<div class="sb-heading">⚙️ Excel → CSV settings</div>', unsafe_allow_html=True)
-    delimiter_label = st.selectbox(
-        "CSV delimiter",
-        ["Comma ( , )", "Semicolon ( ; )", "Tab", "Pipe ( | )"],
-    )
-    out_delimiter = {
-        "Comma ( , )": ",",
-        "Semicolon ( ; )": ";",
-        "Tab": "\t",
-        "Pipe ( | )": "|",
-    }[delimiter_label]
-    include_header = st.toggle("Include header row", value=True)
 
     st.divider()
 
@@ -613,6 +597,26 @@ def excel_to_csv_page():
                 st.warning(f"Could not compute statistics for this sheet: {e}")
 
     with tab_export:
+        st.markdown("#### ⚙️ CSV options")
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            delimiter_label = st.selectbox(
+                "CSV delimiter",
+                ["Comma ( , )", "Semicolon ( ; )", "Tab", "Pipe ( | )"],
+                key="csv_out_delimiter",
+            )
+        with oc2:
+            st.write("")  # vertical alignment
+            include_header = st.toggle("Include header row", value=True, key="csv_out_header")
+        out_delimiter = {
+            "Comma ( , )": ",",
+            "Semicolon ( ; )": ";",
+            "Tab": "\t",
+            "Pipe ( | )": "|",
+        }[delimiter_label]
+
+        st.divider()
+
         csv_name = f"{base}_{safe_name(selected)}.csv"
         csv_bytes = to_csv_bytes(df, out_delimiter, include_header)
 
