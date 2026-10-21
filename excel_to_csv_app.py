@@ -253,7 +253,7 @@ def empty_state(cards):
 # ----------------------------------------------------------------------------
 # Excel -> CSV helpers
 # ----------------------------------------------------------------------------
-@st.cache_data(show_spinner="Reading Excel file...", max_entries=4)
+@st.cache_data(show_spinner="Reading Excel file...")
 def load_all_sheets(file_bytes: bytes) -> dict[str, pl.DataFrame]:
     """Load every sheet in the workbook as {sheet_name: DataFrame}."""
     return pl.read_excel(
@@ -346,7 +346,7 @@ def smart_types(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns([_convert_column(df[c]) for c in df.columns])
 
 
-@st.cache_data(show_spinner="Reading CSV...", max_entries=8)
+@st.cache_data(show_spinner="Reading CSV...")
 def read_csv_bytes(file_bytes: bytes, sep: str, infer_types: bool) -> pl.DataFrame:
     """Read a CSV with every column as text (never fails on mixed columns).
 
@@ -358,7 +358,7 @@ def read_csv_bytes(file_bytes: bytes, sep: str, infer_types: bool) -> pl.DataFra
         separator=sep,
         infer_schema_length=0,  # all columns as text
         encoding="utf8-lossy",
-        truncate_ragged_lines=False,
+        truncate_ragged_lines=True,
     )
     if infer_types:
         try:
@@ -403,21 +403,14 @@ def _build_workbook_manual(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
             ws = wb.add_worksheet(sheet_name)
             for j, col in enumerate(df.columns):
                 ws.write_string(0, j, str(col), header)
-            # Write one column at a time to reduce Python-level overhead versus
-            # nested row/column loops. IDs remain text unless already numeric.
-            for j, col_name in enumerate(df.columns):
-                values = df.get_column(col_name).to_list()
-                for offset, value in enumerate(values, start=1):
-                    if value is None:
+            for i, row in enumerate(df.iter_rows(), start=1):
+                for j, v in enumerate(row):
+                    if v is None:
                         continue
-                    if isinstance(value, bool):
-                        ws.write_boolean(offset, j, value)
-                    elif isinstance(value, (int, float)):
-                        ws.write_number(offset, j, value)
-                    elif hasattr(value, "isoformat"):
-                        ws.write_string(offset, j, value.isoformat(sep=" ") if hasattr(value, "hour") else value.isoformat())
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        ws.write_number(i, j, v)
                     else:
-                        ws.write_string(offset, j, str(value))
+                        ws.write_string(i, j, str(v))
             ws.autofit()
     return buf.getvalue()
 
@@ -491,13 +484,12 @@ with st.sidebar:
         '<div class="sb-tip">📑 Excel sheet names are limited to <b>31 characters</b>; '
         "longer CSV names are shortened automatically.</div>"
         '<div class="sb-tip">👀 Previews show only the first <b>10 rows</b>, '
-        "but downloads always contain <b>all rows</b>.</div>"
-        '<div class="sb-tip">⚠️ CSV rows with inconsistent field counts are reported instead of silently truncated.</div>', 
+        "but downloads always contain <b>all rows</b>.</div>",
         unsafe_allow_html=True,
     )
 
     st.markdown(
-        '<div class="sb-foot">Built with Streamlit &amp; Polars · v1.1</div>',
+        '<div class="sb-foot">Built with Streamlit &amp; Polars</div>',
         unsafe_allow_html=True,
     )
 
@@ -716,18 +708,6 @@ def csv_to_excel_page():
         st.error(f"Could not read **{name}**: {err}")
 
     if not frames:
-        return
-
-    total_rows = sum(df.height for _, df in frames)
-    excel_row_limit = 1_048_576  # includes the header row
-    oversized = [(name, df.height) for name, df in frames if df.height + 1 > excel_row_limit]
-    if oversized:
-        st.error(
-            "Excel worksheets can contain at most 1,048,576 rows including the header. "
-            "These CSV files are too large for a single worksheet: "
-            + ", ".join(f"{name} ({rows:,} data rows)" for name, rows in oversized)
-            + ". Split the files before converting."
-        )
         return
 
     total_rows = sum(df.height for _, df in frames)
