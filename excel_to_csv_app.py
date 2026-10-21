@@ -381,9 +381,9 @@ def make_sheet_name(raw: str, used: set[str]) -> str:
     return candidate
 
 
-def build_workbook(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
+def _build_workbook_polars(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
     buf = io.BytesIO()
-    with Workbook(buf, {"constant_memory": False}) as wb:
+    with Workbook(buf) as wb:
         for sheet_name, df in frames:
             df.write_excel(
                 workbook=wb,
@@ -392,6 +392,34 @@ def build_workbook(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
                 header_format={"bold": True, "bg_color": "#EDE9FE", "border": 1},
             )
     return buf.getvalue()
+
+
+def _build_workbook_manual(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
+    """Backup writer: plain xlsxwriter, numbers as numbers and everything else as text."""
+    buf = io.BytesIO()
+    with Workbook(buf, {"nan_inf_to_errors": True}) as wb:
+        header = wb.add_format({"bold": True, "bg_color": "#EDE9FE", "border": 1})
+        for sheet_name, df in frames:
+            ws = wb.add_worksheet(sheet_name)
+            for j, col in enumerate(df.columns):
+                ws.write_string(0, j, str(col), header)
+            for i, row in enumerate(df.iter_rows(), start=1):
+                for j, v in enumerate(row):
+                    if v is None:
+                        continue
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        ws.write_number(i, j, v)
+                    else:
+                        ws.write_string(i, j, str(v))
+            ws.autofit()
+    return buf.getvalue()
+
+
+def build_workbook(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
+    try:
+        return _build_workbook_polars(frames)
+    except CATCH:
+        return _build_workbook_manual(frames)
 
 
 # ----------------------------------------------------------------------------
@@ -438,8 +466,8 @@ with st.sidebar:
             [
                 "Upload <b>one or more</b> CSV files.",
                 "Choose the <b>delimiter</b> or leave it on auto-detect.",
-                "Review the <b>preview</b> of each file.",
-                "Name the workbook and download the <b>.xlsx</b> (one sheet per CSV).",
+                "Name the workbook and click <b>Download Excel</b> (one sheet per CSV).",
+                "Scroll down to review the <b>preview</b> of each file.",
             ]
         ),
         unsafe_allow_html=True,
@@ -684,6 +712,34 @@ def csv_to_excel_page():
     m2.metric("📑 Total rows", f"{total_rows:,}")
     m3.metric("📦 Uploaded", human_size(sum(f.size for f in files)))
 
+    # ---- Export (shown first so it is always easy to find) ----
+    st.markdown("### 💾 Export to Excel")
+    default_name = frames[0][0] if len(frames) == 1 else "combined"
+    wb_name = st.text_input("Workbook name (without .xlsx)", value=default_name, key="wb_name")
+    wb_name = safe_name(wb_name) or "converted"
+    xlsx_name = f"{wb_name}.xlsx"
+
+    xlsx_bytes = None
+    with st.spinner("Building Excel file..."):
+        try:
+            xlsx_bytes = build_workbook(frames)
+        except CATCH as e:
+            st.error(f"Could not build the Excel file: {e}")
+
+    if xlsx_bytes is not None:
+        st.markdown(f'<span class="file-pill">{html.escape(xlsx_name)}</span>', unsafe_allow_html=True)
+        sheet_list = ", ".join(n for n, _ in frames)
+        st.caption(f"{len(frames)} sheet(s): {sheet_list} · about {human_size(len(xlsx_bytes))}")
+        st.download_button(
+            "⬇️ Download Excel",
+            data=xlsx_bytes,
+            file_name=xlsx_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            key="download_excel_btn",
+        )
+
+    # ---- Preview ----
     st.markdown("### 👀 Preview")
     for sheet_name, df in frames:
         with st.expander(f"{sheet_name}  ({df.height:,} rows × {df.width} cols)", expanded=len(frames) == 1):
@@ -692,29 +748,6 @@ def csv_to_excel_page():
             else:
                 show_df(df.head(PREVIEW_ROWS))
                 st.caption(f"Showing the first {min(PREVIEW_ROWS, df.height)} of {df.height:,} rows.")
-
-    st.markdown("### 💾 Export")
-    default_name = frames[0][0] if len(frames) == 1 else "combined"
-    wb_name = st.text_input("Workbook name (without .xlsx)", value=default_name, key="wb_name")
-    wb_name = safe_name(wb_name) or "converted"
-    xlsx_name = f"{wb_name}.xlsx"
-
-    try:
-        xlsx_bytes = build_workbook(frames)
-    except CATCH as e:
-        st.error(f"Could not build the Excel file: {e}")
-        return
-
-    st.markdown(f'<span class="file-pill">{html.escape(xlsx_name)}</span>', unsafe_allow_html=True)
-    sheet_list = ", ".join(n for n, _ in frames)
-    st.caption(f"{len(frames)} sheet(s): {sheet_list} · about {human_size(len(xlsx_bytes))}")
-    st.download_button(
-        "⬇️ Download Excel",
-        data=xlsx_bytes,
-        file_name=xlsx_name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
 
 
 # ----------------------------------------------------------------------------
