@@ -180,6 +180,34 @@ div[role="radiogroup"] > label:has(input:checked) {
 .stTabs [aria-selected="true"] {
     text-shadow: 0 1px 8px rgba(124, 58, 237, .35);
 }
+
+/* ---------- Sidebar content ---------- */
+.sb-brand {
+    font-size: 1.35rem; font-weight: 800; line-height: 1.2;
+    background: linear-gradient(135deg, #4f46e5, #db2777);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    margin-bottom: .1rem;
+}
+.sb-sub { opacity: .7; font-size: .85rem; margin-bottom: .6rem; }
+.sb-heading { font-weight: 700; font-size: 1rem; margin: .9rem 0 .35rem 0; }
+.sb-group { font-weight: 600; font-size: .85rem; opacity: .85; margin: .7rem 0 .2rem 0; }
+.sb-step { display: flex; gap: .65rem; align-items: flex-start; margin: .42rem 0; }
+.sb-num {
+    flex: 0 0 24px; height: 24px; border-radius: 50%;
+    background: linear-gradient(135deg, #4f46e5, #7c3aed);
+    color: #fff; font-weight: 700; font-size: .78rem;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 3px 8px rgba(124, 58, 237, .40);
+}
+.sb-txt { font-size: .88rem; line-height: 1.35; padding-top: 2px; }
+.sb-tip {
+    background: rgba(124, 58, 237, .10);
+    border: 1px solid rgba(124, 58, 237, .30);
+    border-radius: 12px; padding: .7rem .85rem; font-size: .84rem; line-height: 1.4;
+    box-shadow: 0 4px 12px rgba(124, 58, 237, .12);
+    margin: .3rem 0;
+}
+.sb-foot { opacity: .6; font-size: .78rem; text-align: center; margin-top: 1rem; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -319,8 +347,48 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+def steps_html(steps: list[str]) -> str:
+    return "".join(
+        f'<div class="sb-step"><div class="sb-num">{i}</div><div class="sb-txt">{t}</div></div>'
+        for i, t in enumerate(steps, 1)
+    )
+
+
 with st.sidebar:
-    st.markdown("## ⚙️ Excel → CSV settings")
+    st.markdown(
+        '<div class="sb-brand">📊 Converter Toolkit</div>'
+        '<div class="sb-sub">Excel ⇄ CSV, fast and private-friendly.</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ---- How it works ----
+    st.markdown('<div class="sb-heading">📖 How it works</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sb-group">📊 Excel → CSV</div>'
+        + steps_html(
+            [
+                "Upload an <b>.xlsx / .xlsm / .xls</b> file.",
+                "Pick the <b>sheet</b> you want from the chips.",
+                "Check the <b>preview</b> (first 10 rows), columns and stats.",
+                "Download <b>filename_sheetname.csv</b>, or every sheet as a ZIP.",
+            ]
+        )
+        + '<div class="sb-group">🔄 CSV → Excel</div>'
+        + steps_html(
+            [
+                "Upload <b>one or more</b> CSV files.",
+                "Choose the <b>delimiter</b> or leave it on auto-detect.",
+                "Review the <b>preview</b> of each file.",
+                "Name the workbook and download the <b>.xlsx</b> (one sheet per CSV).",
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+
+    # ---- Settings ----
+    st.markdown('<div class="sb-heading">⚙️ Excel → CSV settings</div>', unsafe_allow_html=True)
     delimiter_label = st.selectbox(
         "CSV delimiter",
         ["Comma ( , )", "Semicolon ( ; )", "Tab", "Pipe ( | )"],
@@ -332,8 +400,26 @@ with st.sidebar:
         "Pipe ( | )": "|",
     }[delimiter_label]
     include_header = st.toggle("Include header row", value=True)
+
     st.divider()
-    st.caption("CSV → Excel options are inside the CSV → Excel tab.")
+
+    # ---- Tips ----
+    st.markdown('<div class="sb-heading">💡 Good to know</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sb-tip">🔢 CSV → Excel keeps every column as <b>text</b> by default, '
+        "so IDs and long numbers are never altered. Tick <i>Detect numbers &amp; dates</i> "
+        "if you need real numbers.</div>"
+        '<div class="sb-tip">📑 Excel sheet names are limited to <b>31 characters</b>; '
+        "longer CSV names are shortened automatically.</div>"
+        '<div class="sb-tip">👀 Previews show only the first <b>10 rows</b>, '
+        "but downloads always contain <b>all rows</b>.</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="sb-foot">Built with Streamlit &amp; Polars</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ----------------------------------------------------------------------------
