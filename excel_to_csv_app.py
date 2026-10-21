@@ -124,6 +124,62 @@ div[role="radiogroup"] > label:has(input:checked) {
     padding: .35rem 1rem;
     font-weight: 600;
 }
+
+/* ---------- Shadow effects ---------- */
+.hero {
+    box-shadow: 0 20px 40px -12px rgba(124, 58, 237, .45),
+                0 8px 16px -8px rgba(0, 0, 0, .25);
+}
+.card {
+    box-shadow: 0 4px 6px rgba(0,0,0,.06), 0 10px 24px rgba(0,0,0,.10);
+    transition: transform .2s ease, box-shadow .2s ease;
+}
+.card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 14px 30px rgba(124, 58, 237, .25), 0 6px 12px rgba(0,0,0,.12);
+}
+[data-testid="stMetric"] {
+    box-shadow: 0 4px 6px rgba(0,0,0,.06), 0 8px 20px rgba(79, 70, 229, .15);
+    transition: transform .2s ease, box-shadow .2s ease;
+}
+[data-testid="stMetric"]:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 26px rgba(79, 70, 229, .28);
+}
+[data-testid="stDataFrame"] {
+    box-shadow: 0 6px 20px rgba(0,0,0,.14);
+}
+[data-testid="stFileUploader"] section {
+    box-shadow: 0 6px 18px rgba(124, 58, 237, .18);
+    transition: box-shadow .2s ease, transform .2s ease;
+}
+[data-testid="stFileUploader"] section:hover {
+    box-shadow: 0 10px 28px rgba(124, 58, 237, .32);
+    transform: translateY(-2px);
+}
+div[role="radiogroup"] > label {
+    box-shadow: 0 2px 8px rgba(0,0,0,.10);
+}
+div[role="radiogroup"] > label:has(input:checked) {
+    box-shadow: 0 6px 18px rgba(124, 58, 237, .40);
+}
+[data-testid="stExpander"] details {
+    border-radius: 14px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.10);
+}
+[data-baseweb="select"] > div, [data-baseweb="input"] {
+    box-shadow: 0 2px 8px rgba(0,0,0,.10);
+    border-radius: 10px;
+}
+[data-testid="stSidebar"] {
+    box-shadow: 4px 0 24px rgba(0,0,0,.14);
+}
+.file-pill {
+    box-shadow: 0 4px 12px rgba(124, 58, 237, .25);
+}
+.stTabs [aria-selected="true"] {
+    text-shadow: 0 1px 8px rgba(124, 58, 237, .35);
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
