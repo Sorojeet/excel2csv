@@ -205,7 +205,7 @@ def read_csv_bytes(file_bytes: bytes, sep: str) -> pl.DataFrame:
     return pl.read_csv(
         io.BytesIO(file_bytes),
         separator=sep,
-        infer_schema_length=10000,
+        infer_schema_length=100000,
         encoding="utf8-lossy",  # tolerate non-UTF-8 characters
         truncate_ragged_lines=True,
     )
