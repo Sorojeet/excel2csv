@@ -287,25 +287,85 @@ def detect_delimiter(file_bytes: bytes) -> str:
         return ","
 
 
+# Polars can raise PanicException (not a subclass of Exception) on rare failures
+try:
+    from polars.exceptions import PanicException
+except Exception:  # pragma: no cover
+    PanicException = Exception
+CATCH = (Exception, PanicException)
+
+_INT_RE = r"^[+-]?\d+$"
+_FLOAT_RE = r"^[+-]?(\d+\.\d*|\.\d+|\d+)$"
+_LEADING_ZERO_RE = r"^[+-]?0\d"
+_DATE_FORMATS = ["%Y-%m-%d"]
+_DATETIME_FORMATS = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"]
+_MAX_SAFE_DIGITS = 15  # Excel stores at most 15 significant digits
+
+
+def _convert_column(s: pl.Series) -> pl.Series:
+    """Convert one text column to int / float / date / datetime when it is safe.
+
+    Columns are left as text when conversion could change the data: leading zeros
+    (e.g. 00123), more than 15 digits (Excel would round them), mixed content,
+    or ambiguous date formats. Any problem keeps the original text column.
+    """
+    try:
+        if s.dtype != pl.String:
+            return s
+
+        t = s.str.strip_chars()
+        clean = t.zip_with(t != "", pl.Series(values=[None] * t.len(), dtype=pl.String))
+        vals = clean.drop_nulls()
+        if vals.len() == 0:
+            return s
+
+        no_leading_zero = not vals.str.contains(_LEADING_ZERO_RE).any()
+        digits_ok = vals.str.count_matches(r"\d").max() <= _MAX_SAFE_DIGITS
+
+        if no_leading_zero and digits_ok:
+            if vals.str.contains(_INT_RE).all():
+                return clean.cast(pl.Int64)
+            if vals.str.contains(_FLOAT_RE).all():
+                return clean.cast(pl.Float64)
+
+        # ISO-style dates only (YYYY-MM-DD) so day/month are never swapped
+        for fmt in _DATE_FORMATS:
+            parsed = clean.str.to_date(fmt, strict=False)
+            if parsed.null_count() == clean.null_count():
+                return parsed
+        for fmt in _DATETIME_FORMATS:
+            parsed = clean.str.to_datetime(fmt, strict=False)
+            if parsed.null_count() == clean.null_count():
+                return parsed
+    except CATCH:
+        pass
+    return s
+
+
+def smart_types(df: pl.DataFrame) -> pl.DataFrame:
+    return df.with_columns([_convert_column(df[c]) for c in df.columns])
+
+
 @st.cache_data(show_spinner="Reading CSV...")
 def read_csv_bytes(file_bytes: bytes, sep: str, infer_types: bool) -> pl.DataFrame:
-    """Read a CSV.
+    """Read a CSV with every column as text (never fails on mixed columns).
 
-    infer_types=False (default): every column is read as text, so IDs, leading
-    zeros and long numbers are preserved exactly and mixed columns never fail.
-    infer_types=True: detect numbers/dates; falls back to text if that fails.
+    If infer_types is True, columns that are safely numeric or ISO dates are then
+    converted one by one; anything uncertain stays as text.
     """
-    common = dict(
+    df = pl.read_csv(
+        io.BytesIO(file_bytes),
         separator=sep,
-        encoding="utf8-lossy",  # tolerate non-UTF-8 characters
+        infer_schema_length=0,  # all columns as text
+        encoding="utf8-lossy",
         truncate_ragged_lines=True,
     )
     if infer_types:
         try:
-            return pl.read_csv(io.BytesIO(file_bytes), infer_schema_length=None, **common)
-        except Exception:
-            pass  # fall through to the safe text-only read
-    return pl.read_csv(io.BytesIO(file_bytes), infer_schema_length=0, **common)
+            df = smart_types(df)
+        except CATCH:
+            pass
+    return df
 
 
 def make_sheet_name(raw: str, used: set[str]) -> str:
@@ -593,7 +653,8 @@ def csv_to_excel_page():
             "Detect numbers & dates",
             value=False,
             help="Off (recommended): all columns stay as text, so IDs and long numbers are kept exactly. "
-            "On: columns that look numeric or date-like are converted.",
+            "On: columns that are clearly numeric or ISO dates (YYYY-MM-DD) are converted. "
+            "Columns with leading zeros, 16+ digits or mixed content stay as text.",
             key="csv_infer_types",
         )
 
@@ -606,7 +667,7 @@ def csv_to_excel_page():
         sep = DELIMITERS[delim_label] or detect_delimiter(raw)
         try:
             df = read_csv_bytes(raw, sep, infer_types)
-        except Exception as e:
+        except CATCH as e:
             problems.append((f.name, str(e)))
             continue
         frames.append((make_sheet_name(Path(f.name).stem, used_names), df))
@@ -640,7 +701,7 @@ def csv_to_excel_page():
 
     try:
         xlsx_bytes = build_workbook(frames)
-    except Exception as e:
+    except CATCH as e:
         st.error(f"Could not build the Excel file: {e}")
         return
 
