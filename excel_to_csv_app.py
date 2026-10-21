@@ -201,14 +201,24 @@ def detect_delimiter(file_bytes: bytes) -> str:
 
 
 @st.cache_data(show_spinner="Reading CSV...")
-def read_csv_bytes(file_bytes: bytes, sep: str) -> pl.DataFrame:
-    return pl.read_csv(
-        io.BytesIO(file_bytes),
+def read_csv_bytes(file_bytes: bytes, sep: str, infer_types: bool) -> pl.DataFrame:
+    """Read a CSV.
+
+    infer_types=False (default): every column is read as text, so IDs, leading
+    zeros and long numbers are preserved exactly and mixed columns never fail.
+    infer_types=True: detect numbers/dates; falls back to text if that fails.
+    """
+    common = dict(
         separator=sep,
-        infer_schema_length=10000,
         encoding="utf8-lossy",  # tolerate non-UTF-8 characters
         truncate_ragged_lines=True,
     )
+    if infer_types:
+        try:
+            return pl.read_csv(io.BytesIO(file_bytes), infer_schema_length=None, **common)
+        except Exception:
+            pass  # fall through to the safe text-only read
+    return pl.read_csv(io.BytesIO(file_bytes), infer_schema_length=0, **common)
 
 
 def make_sheet_name(raw: str, used: set[str]) -> str:
@@ -429,11 +439,22 @@ def csv_to_excel_page():
         )
         return
 
-    delim_label = st.selectbox(
-        "Delimiter used in your CSV file(s)",
-        list(DELIMITERS.keys()),
-        key="csv_in_delimiter",
-    )
+    o1, o2 = st.columns(2)
+    with o1:
+        delim_label = st.selectbox(
+            "Delimiter used in your CSV file(s)",
+            list(DELIMITERS.keys()),
+            key="csv_in_delimiter",
+        )
+    with o2:
+        st.write("")  # vertical alignment
+        infer_types = st.checkbox(
+            "Detect numbers & dates",
+            value=False,
+            help="Off (recommended): all columns stay as text, so IDs and long numbers are kept exactly. "
+            "On: columns that look numeric or date-like are converted.",
+            key="csv_infer_types",
+        )
 
     frames: list[tuple[str, pl.DataFrame]] = []
     used_names: set[str] = set()
@@ -443,7 +464,7 @@ def csv_to_excel_page():
         raw = f.getvalue()
         sep = DELIMITERS[delim_label] or detect_delimiter(raw)
         try:
-            df = read_csv_bytes(raw, sep)
+            df = read_csv_bytes(raw, sep, infer_types)
         except Exception as e:
             problems.append((f.name, str(e)))
             continue
