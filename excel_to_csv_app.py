@@ -1,8 +1,11 @@
 import csv
 import html
 import io
+import operator
 import re
 import zipfile
+from datetime import datetime
+from functools import reduce
 from pathlib import Path
 
 import polars as pl
@@ -280,6 +283,150 @@ def to_csv_bytes(df: pl.DataFrame, sep: str, header: bool) -> bytes:
     return df.write_csv(separator=sep, include_header=header).encode("utf-8")
 
 
+MAX_PICK_VALUES = 300  # columns with up to this many distinct values get a checklist-style picker
+
+
+def column_kind(dtype) -> str:
+    """Classify a column as 'number', 'date' or 'text' for choosing a filter control."""
+    try:
+        if dtype == pl.Date or dtype == pl.Datetime:
+            return "date"
+        if dtype.is_numeric():
+            return "number"
+    except CATCH:
+        pass
+    return "text"
+
+
+def _column_filter(df: pl.DataFrame, col: str, key: str):
+    """Show the right filter control for one column.
+
+    Returns (polars expression, description), or (None, None) when no filter is set.
+    """
+    st.markdown(f"**{col}**")
+    try:
+        s = df[col]
+        kind = column_kind(s.dtype)
+
+        if kind == "number":
+            if s.dtype.is_float():
+                s = s.filter(s.is_finite())
+            mn, mx = s.min(), s.max()
+            if mn is None or mn == mx:
+                st.caption("Nothing to filter: blank or a single value.")
+                return None, None
+            cast = int if s.dtype.is_integer() else float
+            c1, c2 = st.columns(2)
+            lo = c1.number_input("From", value=cast(mn), min_value=cast(mn), max_value=cast(mx), key=key + "lo")
+            hi = c2.number_input("To", value=cast(mx), min_value=cast(mn), max_value=cast(mx), key=key + "hi")
+            return (pl.col(col) >= lo) & (pl.col(col) <= hi), f"{col} between {lo} and {hi}"
+
+        if kind == "date":
+            mn, mx = s.min(), s.max()
+            if mn is None:
+                st.caption("All values are blank.")
+                return None, None
+            if isinstance(mn, datetime):
+                mn, mx = mn.date(), mx.date()
+            rng = st.date_input("Between", value=(mn, mx), min_value=mn, max_value=mx, key=key + "rng")
+            if not (isinstance(rng, (tuple, list)) and len(rng) == 2):
+                st.caption("Pick an end date.")
+                return None, None
+            start, end = rng
+            return pl.col(col).cast(pl.Date).is_between(start, end), f"{col} from {start} to {end}"
+
+        # text-like columns
+        if s.n_unique() <= MAX_PICK_VALUES:
+            values = sorted(str(v) for v in s.drop_nulls().cast(pl.String).unique().to_list())
+            options = (["(blank)"] if s.null_count() > 0 else []) + values
+            picked = st.multiselect(
+                "Keep only these values",
+                options,
+                key=key + "vals",
+                help="Leave empty to keep everything.",
+            )
+            if not picked:
+                return None, None
+            wanted = [v for v in picked if v != "(blank)"]
+            cond = pl.col(col).cast(pl.String).is_in(wanted)
+            if "(blank)" in picked:
+                cond = cond | pl.col(col).is_null()
+            return cond, f"{col} is one of {len(picked)} selected value(s)"
+
+        mode = st.selectbox("Match", ["contains", "equals", "starts with", "ends with"], key=key + "mode")
+        text = st.text_input("Text", key=key + "text")
+        if not text:
+            return None, None
+        e = pl.col(col).cast(pl.String).str.to_lowercase()
+        t = text.lower()
+        cond = {
+            "contains": e.str.contains(t, literal=True),
+            "equals": e == t,
+            "starts with": e.str.starts_with(t),
+            "ends with": e.str.ends_with(t),
+        }[mode]
+        return cond, f'{col} {mode} "{text}"'
+    except CATCH as e:
+        st.warning(f"Could not filter this column: {e}")
+        return None, None
+
+
+def filter_ui(df: pl.DataFrame, prefix: str):
+    """Excel-style filters. Returns (filtered DataFrame, list of active filter descriptions)."""
+    st.markdown("#### 🔎 Filters")
+    t1, t2 = st.columns([2, 3])
+    with t1:
+        query = st.text_input("Search in all columns", key=prefix + "search")
+    with t2:
+        chosen = st.multiselect(
+            "Filter by column",
+            list(df.columns),
+            key=prefix + "cols",
+            help="Choose the columns you want to filter, like Excel's filter dropdowns.",
+        )
+
+    conds, active = [], []
+    q = query.strip().lower()
+    if q:
+        conds.append(
+            pl.any_horizontal(
+                [
+                    pl.col(c).cast(pl.String).str.to_lowercase().str.contains(q, literal=True).fill_null(False)
+                    for c in df.columns
+                ]
+            )
+        )
+        active.append(f'any column contains "{query.strip()}"')
+
+    if chosen:
+        grid = st.columns(2)
+        for i, col in enumerate(chosen):
+            with grid[i % 2]:
+                cond, desc = _column_filter(df, col, f"{prefix}f{df.columns.index(col)}_")
+                if cond is not None:
+                    conds.append(cond)
+                    active.append(desc)
+
+    def _clear():
+        for k in list(st.session_state.keys()):
+            if str(k).startswith(prefix) and not str(k).endswith("clear"):
+                del st.session_state[k]
+
+    if q or chosen:
+        st.button("✖ Clear all filters", key=prefix + "clear", on_click=_clear)
+
+    fdf = df
+    if conds:
+        try:
+            fdf = df.filter(reduce(operator.and_, conds))
+        except CATCH as e:
+            st.error(f"Could not apply the filters: {e}")
+            fdf, active = df, []
+        if active:
+            st.caption("Active filters: " + " · ".join(active))
+    return fdf, active
+
+
 # ----------------------------------------------------------------------------
 # CSV -> Excel helpers
 # ----------------------------------------------------------------------------
@@ -548,7 +695,7 @@ with st.sidebar:
             [
                 "Upload an <b>.xlsx / .xlsm / .xls</b> file.",
                 "Pick the <b>sheet</b> you want from the chips.",
-                "Check the <b>preview</b> (all rows), columns and stats.",
+                "Add <b>filters</b> on any column, then check the <b>preview</b>, columns and stats.",
                 "In the <b>Export</b> tab, set the delimiter and header, then download <b>filename_sheetname.csv</b> or every sheet as a ZIP.",
             ]
         )
@@ -652,48 +799,58 @@ def excel_to_csv_page():
     df = sheets[selected]
 
     tab_preview, tab_cols, tab_stats, tab_export = st.tabs(
-        ["👀 Preview", "🧬 Columns", "📈 Statistics", "💾 Export"]
+        ["👀 Preview & Filter", "🧬 Columns", "📈 Statistics", "💾 Export"]
     )
 
     with tab_preview:
+        if df.height == 0:
+            fdf, active = df, []
+        else:
+            fdf, active = filter_ui(df, f"flt_{uploaded.name}_{uploaded.size}_{selected}_")
+
         k1, k2, k3 = st.columns(3)
-        k1.metric("Rows", f"{df.height:,}")
+        k1.metric("Rows", f"{fdf.height:,} of {df.height:,}" if active else f"{df.height:,}")
         k2.metric("Columns", f"{df.width:,}")
-        k3.metric("Null cells", f"{sum(df.null_count().row(0)):,}")
+        k3.metric("Null cells", f"{sum(fdf.null_count().row(0)):,}")
 
         if df.height == 0:
             st.info("This sheet is empty.")
+        elif fdf.height == 0:
+            st.warning("No rows match the current filters.")
         else:
-            shown = df.head(EXCEL_PREVIEW_MAX)
-            show_df(shown)
-            if df.height > EXCEL_PREVIEW_MAX:
+            show_df(fdf.head(EXCEL_PREVIEW_MAX))
+            if fdf.height > EXCEL_PREVIEW_MAX:
                 st.caption(
-                    f"Showing the first {EXCEL_PREVIEW_MAX:,} of {df.height:,} rows "
+                    f"Showing the first {EXCEL_PREVIEW_MAX:,} of {fdf.height:,} rows "
                     "(capped so the browser stays responsive). The export contains every row."
                 )
             else:
-                st.caption(f"Showing all {df.height:,} rows.")
+                st.caption(f"Showing all {fdf.height:,} {'filtered ' if active else ''}rows.")
 
     with tab_cols:
-        nulls = df.null_count().row(0)
+        nulls = fdf.null_count().row(0)
         show_df(
             pl.DataFrame(
                 {
-                    "Column": df.columns,
-                    "Type": [str(t) for t in df.dtypes],
+                    "Column": fdf.columns,
+                    "Type": [str(t) for t in fdf.dtypes],
                     "Nulls": list(nulls),
-                    "Unique": [df[c].n_unique() for c in df.columns],
+                    "Unique": [fdf[c].n_unique() for c in fdf.columns],
                 }
             ),
             hide_index=True,
         )
+        if active:
+            st.caption("Counts reflect the current filters.")
 
     with tab_stats:
-        if df.height == 0:
-            st.info("This sheet is empty.")
+        if fdf.height == 0:
+            st.info("No rows to summarise.")
         else:
             try:
-                show_df(df.describe())
+                show_df(fdf.describe())
+                if active:
+                    st.caption("Statistics reflect the current filters.")
             except Exception as e:
                 st.warning(f"Could not compute statistics for this sheet: {e}")
 
@@ -719,11 +876,15 @@ def excel_to_csv_page():
         st.divider()
 
         csv_name = f"{base}_{safe_name(selected)}.csv"
-        csv_bytes = to_csv_bytes(df, out_delimiter, include_header)
+        csv_bytes = to_csv_bytes(fdf, out_delimiter, include_header)
 
         st.markdown("#### Selected sheet")
+        if active:
+            st.info(f"Filters applied: {' · '.join(active)}. Exporting {fdf.height:,} of {df.height:,} rows.")
+        if fdf.height == 0:
+            st.warning("No rows match the filters, so the CSV will contain only the header row.")
         st.markdown(f'<span class="file-pill">{html.escape(csv_name)}</span>', unsafe_allow_html=True)
-        st.caption(f"{df.height:,} rows · {df.width} columns · about {human_size(len(csv_bytes))}")
+        st.caption(f"{fdf.height:,} rows · {fdf.width} columns · about {human_size(len(csv_bytes))}")
         st.download_button(
             "⬇️ Download CSV",
             data=csv_bytes,
@@ -735,7 +896,7 @@ def excel_to_csv_page():
         if len(sheet_names) > 1:
             st.divider()
             st.markdown("#### Every sheet at once")
-            st.caption("All sheets as separate CSV files in one ZIP, each named filename_sheetname.csv.")
+            st.caption("All sheets, unfiltered, as separate CSV files in one ZIP, each named filename_sheetname.csv.")
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for s in sheet_names:
