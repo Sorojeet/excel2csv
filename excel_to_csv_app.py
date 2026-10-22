@@ -358,20 +358,35 @@ def smart_types(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns([_convert_column(df[c]) for c in df.columns])
 
 
-@st.cache_data(show_spinner="Reading CSV...")
-def read_csv_bytes(file_bytes: bytes, sep: str, infer_types: bool) -> pl.DataFrame:
+def peek_columns(f, sep: str) -> list[str]:
+    """Read only the header line of an uploaded CSV (fast, tiny memory)."""
+    f.seek(0)
+    first_line = f.read(1_000_000).split(b"\n", 1)[0].rstrip(b"\r")
+    f.seek(0)
+    header = pl.read_csv(
+        io.BytesIO(first_line),
+        separator=sep,
+        infer_schema_length=0,
+        encoding="utf8-lossy",
+    )
+    return header.columns
+
+
+def read_csv_file(f, sep: str, infer_types: bool) -> pl.DataFrame:
     """Read a CSV with every column as text (never fails on mixed columns).
 
     If infer_types is True, columns that are safely numeric or ISO dates are then
     converted one by one; anything uncertain stays as text.
     """
+    f.seek(0)
     df = pl.read_csv(
-        io.BytesIO(file_bytes),
+        f,
         separator=sep,
         infer_schema_length=0,  # all columns as text
         encoding="utf8-lossy",
         truncate_ragged_lines=True,
     )
+    f.seek(0)
     if infer_types:
         try:
             df = smart_types(df)
@@ -393,45 +408,101 @@ def make_sheet_name(raw: str, used: set[str]) -> str:
     return candidate
 
 
-def _build_workbook_polars(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
+MAX_XLSX_ROWS = 1_048_576  # Excel's hard limit per sheet (including the header row)
+PROGRESS_EVERY = 20_000
+
+
+def build_workbook_streaming(files, delim_label: str, infer_types: bool, on_progress):
+    """Write CSV files into one workbook using xlsxwriter's constant-memory mode.
+
+    Rows are streamed to disk instead of being held in memory, so large files
+    (100 MB+) work. One CSV becomes one sheet; a CSV with more rows than Excel
+    allows is split across several sheets automatically.
+    """
     buf = io.BytesIO()
-    with Workbook(buf) as wb:
-        for sheet_name, df in frames:
-            df.write_excel(
-                workbook=wb,
-                worksheet=sheet_name,
-                autofit=True,
-                header_format={"bold": True, "bg_color": "#EDE9FE", "border": 1},
-            )
-    return buf.getvalue()
+    used: set[str] = set()
+    sheet_names: list[str] = []
+    notes: list[str] = []
+    total_rows = 0
+    n_files = len(files)
 
+    options = {
+        "constant_memory": True,
+        "strings_to_formulas": False,  # text starting with "=" stays text
+        "strings_to_urls": False,
+        "strings_to_numbers": False,
+        "nan_inf_to_errors": True,
+    }
+    with Workbook(buf, options) as wb:
+        header_fmt = wb.add_format({"bold": True, "bg_color": "#EDE9FE", "border": 1})
+        date_fmt = wb.add_format({"num_format": "yyyy-mm-dd"})
+        datetime_fmt = wb.add_format({"num_format": "yyyy-mm-dd hh:mm:ss"})
 
-def _build_workbook_manual(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
-    """Backup writer: plain xlsxwriter, numbers as numbers and everything else as text."""
-    buf = io.BytesIO()
-    with Workbook(buf, {"nan_inf_to_errors": True}) as wb:
-        header = wb.add_format({"bold": True, "bg_color": "#EDE9FE", "border": 1})
-        for sheet_name, df in frames:
-            ws = wb.add_worksheet(sheet_name)
-            for j, col in enumerate(df.columns):
-                ws.write_string(0, j, str(col), header)
-            for i, row in enumerate(df.iter_rows(), start=1):
-                for j, v in enumerate(row):
-                    if v is None:
-                        continue
-                    if isinstance(v, (int, float)) and not isinstance(v, bool):
-                        ws.write_number(i, j, v)
-                    else:
-                        ws.write_string(i, j, str(v))
-            ws.autofit()
-    return buf.getvalue()
+        for fi, f in enumerate(files):
+            f.seek(0)
+            sample = f.read(8192)
+            f.seek(0)
+            sep = DELIMITERS[delim_label] or detect_delimiter(sample)
 
+            on_progress(fi / n_files, f"Reading {f.name} ...")
+            df = read_csv_file(f, sep, infer_types)
+            n = df.height
+            total_rows += n
+            columns = df.columns
 
-def build_workbook(frames: list[tuple[str, pl.DataFrame]]) -> bytes:
-    try:
-        return _build_workbook_polars(frames)
-    except CATCH:
-        return _build_workbook_manual(frames)
+            # Column widths (from header + first rows) and date formats
+            head = df.head(200)
+            widths, col_fmts = [], []
+            for c in columns:
+                try:
+                    longest = head[c].cast(pl.String).str.len_chars().max() or 0
+                except CATCH:
+                    longest = 10
+                widths.append(min(max(len(str(c)), longest) + 2, 50))
+                dtype = df.schema[c]
+                if dtype == pl.Date:
+                    col_fmts.append(date_fmt)
+                elif dtype == pl.Datetime:
+                    col_fmts.append(datetime_fmt)
+                else:
+                    col_fmts.append(None)
+
+            base = Path(f.name).stem
+            part = 0
+
+            def new_sheet():
+                nonlocal part
+                part += 1
+                raw = base if part == 1 else f"{base[:24]}_part{part}"
+                name = make_sheet_name(raw, used)
+                sheet_names.append(name)
+                ws = wb.add_worksheet(name)
+                ws.write_row(0, 0, [str(c) for c in columns], header_fmt)
+                for j, (w, fm) in enumerate(zip(widths, col_fmts)):
+                    ws.set_column(j, j, w, fm)
+                ws.freeze_panes(1, 0)
+                return ws
+
+            ws = new_sheet()
+            r = 1
+            for i, row in enumerate(df.iter_rows()):
+                if r >= MAX_XLSX_ROWS:
+                    ws = new_sheet()
+                    r = 1
+                ws.write_row(r, 0, row)
+                r += 1
+                if i % PROGRESS_EVERY == 0:
+                    on_progress((fi + i / max(n, 1)) / n_files, f"Writing {f.name}: {i:,} / {n:,} rows")
+
+            if part > 1:
+                notes.append(
+                    f"{f.name} has more rows than one Excel sheet can hold "
+                    f"({MAX_XLSX_ROWS:,}), so it was split across {part} sheets."
+                )
+            del df, head
+
+    on_progress(1.0, "Finalising workbook ...")
+    return buf.getvalue(), sheet_names, notes, total_rows
 
 
 # ----------------------------------------------------------------------------
@@ -496,7 +567,10 @@ with st.sidebar:
         '<div class="sb-tip">📑 Excel sheet names are limited to <b>31 characters</b>; '
         "longer CSV names are shortened automatically.</div>"
         '<div class="sb-tip">👀 The Excel → CSV preview shows only the first <b>10 rows</b>, '
-        "but downloads always contain <b>all rows</b>.</div>",
+        "but downloads always contain <b>all rows</b>.</div>"
+        '<div class="sb-tip">📦 Big CSVs (10 MB+) start converting when you click '
+        "<b>Build Excel file</b>. A 100 MB file can take a minute or two, and files over "
+        "1,048,576 rows are split across several sheets because of Excel's limit.</div>",
         unsafe_allow_html=True,
     )
 
@@ -665,6 +739,9 @@ def excel_to_csv_page():
 # ----------------------------------------------------------------------------
 # Page 2: CSV -> Excel
 # ----------------------------------------------------------------------------
+AUTO_BUILD_BYTES = 10 * 1024 * 1024  # build automatically below this total upload size
+
+
 def csv_to_excel_page():
     files = st.file_uploader(
         "Drop one or more CSV files here",
@@ -679,7 +756,7 @@ def csv_to_excel_page():
             [
                 ("📄", "One or many CSVs", "Upload several files and each becomes its own sheet."),
                 ("🔍", "Smart delimiter", "Comma, semicolon, tab or pipe is detected automatically."),
-                ("📗", "Clean Excel output", "Bold, shaded headers and auto-fitted column widths."),
+                ("📗", "Built for big files", "Large CSVs are streamed, and split if they exceed Excel's row limit."),
             ]
         )
         return
@@ -702,53 +779,85 @@ def csv_to_excel_page():
             key="csv_infer_types",
         )
 
-    frames: list[tuple[str, pl.DataFrame]] = []
-    used_names: set[str] = set()
-    problems = []
-
+    # Read only the header line of each file (fast, no big memory use)
+    infos = []
     for f in files:
-        raw = f.getvalue()
-        sep = DELIMITERS[delim_label] or detect_delimiter(raw)
+        f.seek(0)
+        sample = f.read(8192)
+        f.seek(0)
+        sep = DELIMITERS[delim_label] or detect_delimiter(sample)
         try:
-            df = read_csv_bytes(raw, sep, infer_types)
+            infos.append((f, peek_columns(f, sep)))
         except CATCH as e:
-            problems.append((f.name, str(e)))
-            continue
-        frames.append((make_sheet_name(Path(f.name).stem, used_names), df))
+            st.error(f"Could not read **{f.name}**: {e}")
 
-    for name, err in problems:
-        st.error(f"Could not read **{name}**: {err}")
-
-    if not frames:
+    if not infos:
         return
 
-    total_rows = sum(df.height for _, df in frames)
-    m1, m2, m3 = st.columns(3)
-    m1.metric("📄 CSV files", len(frames))
-    m2.metric("📑 Total rows", f"{total_rows:,}")
-    m3.metric("📦 Uploaded", human_size(sum(f.size for f in files)))
+    good_files = [f for f, _ in infos]
+    total_size = sum(f.size for f in good_files)
 
-    # ---- Export (shown first so it is always easy to find) ----
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📄 CSV files", len(good_files))
+    m2.metric("🧬 Columns", sum(len(c) for _, c in infos))
+    m3.metric("📦 Uploaded", human_size(total_size))
+
+    # ---- Export ----
     st.markdown("### 💾 Export to Excel")
-    default_name = frames[0][0] if len(frames) == 1 else "combined"
+    default_name = Path(good_files[0].name).stem if len(good_files) == 1 else "combined"
     wb_name = st.text_input("Workbook name (without .xlsx)", value=default_name, key="wb_name")
     wb_name = safe_name(wb_name) or "converted"
     xlsx_name = f"{wb_name}.xlsx"
 
-    xlsx_bytes = None
-    with st.spinner("Building Excel file..."):
-        try:
-            xlsx_bytes = build_workbook(frames)
-        except CATCH as e:
-            st.error(f"Could not build the Excel file: {e}")
+    sig = (tuple((f.name, f.size) for f in good_files), delim_label, infer_types)
+    state = st.session_state.get("xlsx_result")
+    if state is not None and state["sig"] != sig:
+        state = None
 
-    if xlsx_bytes is not None:
+    clicked = False
+    if state is None and total_size > AUTO_BUILD_BYTES:
+        st.info(
+            f"Large upload ({human_size(total_size)}). Building the workbook can take a minute or two, "
+            "so it starts when you click the button."
+        )
+        clicked = st.button("⚙️ Build Excel file", key="build_excel_btn")
+
+    if state is None and (total_size <= AUTO_BUILD_BYTES or clicked):
+        bar = st.progress(0.0, text="Starting ...")
+
+        def on_progress(frac: float, text: str):
+            bar.progress(min(max(frac, 0.0), 1.0), text=text)
+
+        try:
+            data, sheet_names, notes, total_rows = build_workbook_streaming(
+                good_files, delim_label, infer_types, on_progress
+            )
+            state = {
+                "sig": sig,
+                "data": data,
+                "sheets": sheet_names,
+                "notes": notes,
+                "rows": total_rows,
+            }
+            st.session_state["xlsx_result"] = state
+        except CATCH as e:
+            st.session_state.pop("xlsx_result", None)
+            st.error(f"Could not build the Excel file: {e}")
+        finally:
+            bar.empty()
+
+    if state is not None:
+        for note in state["notes"]:
+            st.warning(note)
         st.markdown(f'<span class="file-pill">{html.escape(xlsx_name)}</span>', unsafe_allow_html=True)
-        sheet_list = ", ".join(n for n, _ in frames)
-        st.caption(f"{len(frames)} sheet(s): {sheet_list} · about {human_size(len(xlsx_bytes))}")
+        sheet_list = ", ".join(state["sheets"])
+        st.caption(
+            f"{state['rows']:,} rows · {len(state['sheets'])} sheet(s): {sheet_list} · "
+            f"about {human_size(len(state['data']))}"
+        )
         st.download_button(
             "⬇️ Download Excel",
-            data=xlsx_bytes,
+            data=state["data"],
             file_name=xlsx_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
@@ -757,12 +866,12 @@ def csv_to_excel_page():
 
     # ---- Column names only ----
     st.markdown("### 🧬 Columns")
-    for sheet_name, df in frames:
-        with st.expander(f"{sheet_name}  ({df.width} columns · {df.height:,} rows)", expanded=len(frames) == 1):
-            if df.width == 0:
+    for f, cols in infos:
+        with st.expander(f"{f.name}  ({len(cols)} columns · {human_size(f.size)})", expanded=len(infos) == 1):
+            if not cols:
                 st.info("No columns found in this file.")
             else:
-                chips = "".join(f'<span class="col-chip">{html.escape(str(c))}</span>' for c in df.columns)
+                chips = "".join(f'<span class="col-chip">{html.escape(str(c))}</span>' for c in cols)
                 st.markdown(f'<div class="col-chips">{chips}</div>', unsafe_allow_html=True)
 
 
