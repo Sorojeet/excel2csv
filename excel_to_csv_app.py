@@ -225,7 +225,8 @@ div[role="radiogroup"] > label:has(input:checked) {
 st.markdown(CSS, unsafe_allow_html=True)
 
 
-PREVIEW_ROWS = 10  # preview is limited to this many rows
+PREVIEW_ROWS = 10  # CSV -> Excel preview: first rows of each file
+EXCEL_PREVIEW_MAX = 100_000  # Excel -> CSV preview shows all rows up to this cap
 
 
 # ----------------------------------------------------------------------------
@@ -358,18 +359,25 @@ def smart_types(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns([_convert_column(df[c]) for c in df.columns])
 
 
-def peek_columns(f, sep: str) -> list[str]:
-    """Read only the header line of an uploaded CSV (fast, tiny memory)."""
+def peek_preview(f, sep: str, n_rows: int | None = None) -> pl.DataFrame:
+    """Read just the first few rows of an uploaded CSV (fast, tiny memory)."""
+    n_rows = n_rows or PREVIEW_ROWS
+    limit = 5_000_000
     f.seek(0)
-    first_line = f.read(1_000_000).split(b"\n", 1)[0].rstrip(b"\r")
+    chunk = f.read(limit)
     f.seek(0)
-    header = pl.read_csv(
-        io.BytesIO(first_line),
+    if len(chunk) == limit:  # drop the possibly cut-off last line
+        cut = chunk.rfind(b"\n")
+        if cut > 0:
+            chunk = chunk[:cut]
+    return pl.read_csv(
+        io.BytesIO(chunk),
         separator=sep,
-        infer_schema_length=0,
+        infer_schema_length=0,  # show everything as text
         encoding="utf8-lossy",
+        truncate_ragged_lines=True,
+        n_rows=n_rows,
     )
-    return header.columns
 
 
 def read_csv_file(f, sep: str, infer_types: bool) -> pl.DataFrame:
@@ -540,7 +548,7 @@ with st.sidebar:
             [
                 "Upload an <b>.xlsx / .xlsm / .xls</b> file.",
                 "Pick the <b>sheet</b> you want from the chips.",
-                "Check the <b>preview</b> (first 10 rows), columns and stats.",
+                "Check the <b>preview</b> (all rows), columns and stats.",
                 "In the <b>Export</b> tab, set the delimiter and header, then download <b>filename_sheetname.csv</b> or every sheet as a ZIP.",
             ]
         )
@@ -550,7 +558,7 @@ with st.sidebar:
                 "Upload <b>one or more</b> CSV files.",
                 "Choose the <b>delimiter</b> or leave it on auto-detect.",
                 "Name the workbook and click <b>Download Excel</b> (one sheet per CSV).",
-                "Scroll down to see the <b>column names</b> of each file.",
+                "Scroll down to preview the <b>first 10 rows</b> of each file.",
             ]
         ),
         unsafe_allow_html=True,
@@ -566,8 +574,8 @@ with st.sidebar:
         "if you need real numbers.</div>"
         '<div class="sb-tip">📑 Excel sheet names are limited to <b>31 characters</b>; '
         "longer CSV names are shortened automatically.</div>"
-        '<div class="sb-tip">👀 The Excel → CSV preview shows only the first <b>10 rows</b>, '
-        "but downloads always contain <b>all rows</b>.</div>"
+        '<div class="sb-tip">👀 Excel → CSV previews show <b>every row</b>; CSV → Excel previews show the first <b>10 rows</b>. '
+        "Downloads always contain <b>all rows</b>.</div>"
         '<div class="sb-tip">📦 Big CSVs (10 MB+) start converting when you click '
         "<b>Build Excel file</b>. A 100 MB file can take a minute or two, and files over "
         "1,048,576 rows are split across several sheets because of Excel's limit.</div>",
@@ -656,8 +664,15 @@ def excel_to_csv_page():
         if df.height == 0:
             st.info("This sheet is empty.")
         else:
-            show_df(df.head(PREVIEW_ROWS))
-            st.caption(f"Showing the first {min(PREVIEW_ROWS, df.height)} of {df.height:,} rows.")
+            shown = df.head(EXCEL_PREVIEW_MAX)
+            show_df(shown)
+            if df.height > EXCEL_PREVIEW_MAX:
+                st.caption(
+                    f"Showing the first {EXCEL_PREVIEW_MAX:,} of {df.height:,} rows "
+                    "(capped so the browser stays responsive). The export contains every row."
+                )
+            else:
+                st.caption(f"Showing all {df.height:,} rows.")
 
     with tab_cols:
         nulls = df.null_count().row(0)
@@ -787,7 +802,7 @@ def csv_to_excel_page():
         f.seek(0)
         sep = DELIMITERS[delim_label] or detect_delimiter(sample)
         try:
-            infos.append((f, peek_columns(f, sep)))
+            infos.append((f, peek_preview(f, sep)))
         except CATCH as e:
             st.error(f"Could not read **{f.name}**: {e}")
 
@@ -799,7 +814,7 @@ def csv_to_excel_page():
 
     m1, m2, m3 = st.columns(3)
     m1.metric("📄 CSV files", len(good_files))
-    m2.metric("🧬 Columns", sum(len(c) for _, c in infos))
+    m2.metric("🧬 Columns", sum(p.width for _, p in infos))
     m3.metric("📦 Uploaded", human_size(total_size))
 
     # ---- Export ----
@@ -864,15 +879,23 @@ def csv_to_excel_page():
             key="download_excel_btn",
         )
 
-    # ---- Column names only ----
-    st.markdown("### 🧬 Columns")
-    for f, cols in infos:
-        with st.expander(f"{f.name}  ({len(cols)} columns · {human_size(f.size)})", expanded=len(infos) == 1):
-            if not cols:
+    # ---- Preview: first rows of each file ----
+    st.markdown("### 👀 Preview")
+    for f, prev in infos:
+        with st.expander(
+            f"{f.name}  ({prev.width} columns · {human_size(f.size)})",
+            expanded=len(infos) == 1,
+        ):
+            if prev.width == 0:
                 st.info("No columns found in this file.")
+            elif prev.height == 0:
+                st.info("This file has a header row but no data rows.")
             else:
-                chips = "".join(f'<span class="col-chip">{html.escape(str(c))}</span>' for c in cols)
-                st.markdown(f'<div class="col-chips">{chips}</div>', unsafe_allow_html=True)
+                show_df(prev)
+                if prev.height < PREVIEW_ROWS:
+                    st.caption(f"Showing all {prev.height} row(s) of this file.")
+                else:
+                    st.caption(f"Showing the first {PREVIEW_ROWS} rows. The Excel file will contain every row.")
 
 
 # ----------------------------------------------------------------------------
