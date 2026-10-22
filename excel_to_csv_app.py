@@ -208,6 +208,18 @@ div[role="radiogroup"] > label:has(input:checked) {
     margin: .3rem 0;
 }
 .sb-foot { opacity: .6; font-size: .78rem; text-align: center; margin-top: 1rem; }
+
+/* ---------- Column name chips ---------- */
+.col-chips { display: flex; flex-wrap: wrap; gap: .5rem; margin: .3rem 0 .2rem 0; }
+.col-chip {
+    background: rgba(124, 58, 237, .12);
+    border: 1px solid rgba(124, 58, 237, .35);
+    border-radius: 999px;
+    padding: .25rem .8rem;
+    font-size: .86rem;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(124, 58, 237, .15);
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -467,7 +479,7 @@ with st.sidebar:
                 "Upload <b>one or more</b> CSV files.",
                 "Choose the <b>delimiter</b> or leave it on auto-detect.",
                 "Name the workbook and click <b>Download Excel</b> (one sheet per CSV).",
-                "Scroll down to review the <b>preview</b> of each file.",
+                "Scroll down to see the <b>column names</b> of each file.",
             ]
         ),
         unsafe_allow_html=True,
@@ -483,7 +495,7 @@ with st.sidebar:
         "if you need real numbers.</div>"
         '<div class="sb-tip">📑 Excel sheet names are limited to <b>31 characters</b>; '
         "longer CSV names are shortened automatically.</div>"
-        '<div class="sb-tip">👀 Previews show only the first <b>10 rows</b>, '
+        '<div class="sb-tip">👀 The Excel → CSV preview shows only the first <b>10 rows</b>, '
         "but downloads always contain <b>all rows</b>.</div>",
         unsafe_allow_html=True,
     )
@@ -743,15 +755,15 @@ def csv_to_excel_page():
             key="download_excel_btn",
         )
 
-    # ---- Preview ----
-    st.markdown("### 👀 Preview")
+    # ---- Column names only ----
+    st.markdown("### 🧬 Columns")
     for sheet_name, df in frames:
-        with st.expander(f"{sheet_name}  ({df.height:,} rows × {df.width} cols)", expanded=len(frames) == 1):
-            if df.height == 0:
-                st.info("This file has no data rows.")
+        with st.expander(f"{sheet_name}  ({df.width} columns · {df.height:,} rows)", expanded=len(frames) == 1):
+            if df.width == 0:
+                st.info("No columns found in this file.")
             else:
-                show_df(df.head(PREVIEW_ROWS))
-                st.caption(f"Showing the first {min(PREVIEW_ROWS, df.height)} of {df.height:,} rows.")
+                chips = "".join(f'<span class="col-chip">{html.escape(str(c))}</span>' for c in df.columns)
+                st.markdown(f'<div class="col-chips">{chips}</div>', unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------
